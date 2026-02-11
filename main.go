@@ -1,22 +1,29 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"mime"
 	"net"
 	"net/http"
 	"path"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 func main() {
 	args := parseArgs()
 	fs := http.FileServer(http.Dir(args.folder))
-	http.Handle("/", fs)
 
 	var handler http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
 		url := r.URL.Path
@@ -25,8 +32,8 @@ func main() {
 		if !isDir {
 			filename := path.Base(url)
 			if isMedia(filename) {
-				filename := fmt.Sprintf("attachment; filename=%s", strconv.Quote(filename))
-				w.Header().Set("Content-Disposition", filename)
+				disposition := fmt.Sprintf("attachment; filename=%s", strconv.Quote(filename))
+				w.Header().Set("Content-Disposition", disposition)
 			}
 		}
 
@@ -38,8 +45,9 @@ func main() {
 
 		if !args.silent {
 			fmt.Printf(
-				"\x1b[1m\x1b[38;5;228m%s \x1b[38;5;195m%s\x1b[0m \x1b[38;5;225m%s\x1b[0m | \x1b[38;5;158m%s\x1b[0m\n",
+				"\x1b[1m\x1b[38;5;228m%s %s \x1b[38;5;195m%s\x1b[0m \x1b[38;5;225m%s\x1b[0m | \x1b[38;5;158m%s\x1b[0m\n",
 				r.Method,
+				r.URL.Path,
 				r.Proto,
 				r.RemoteAddr,
 				r.Header.Get("User-Agent"),
@@ -53,25 +61,40 @@ func main() {
 		getLocalAddr(),
 		args.port,
 	)
-	log.Fatal(http.ListenAndServe(":"+args.port, handler))
+
+	if args.https {
+		fmt.Printf("\x1b[38;5;159mhttps://localhost:%s\n\x1b[38;5;158mhttps://%s:%s\n", args.port, getLocalAddr(), args.port)
+		tlsConfig := generateTLSConfig()
+		server := &http.Server{
+			Addr:      ":" + args.port,
+			Handler:   handler,
+			TLSConfig: tlsConfig,
+		}
+		log.Fatal(server.ListenAndServeTLS("", "")) // certs provided by TLSConfig
+	} else {
+		log.Fatal(http.ListenAndServe(":"+args.port, handler))
+	}
 }
 
 type Args struct {
 	port   string
 	folder string
 	silent bool
+	https  bool
 }
 
 func parseArgs() Args {
 	port := flag.Int("port", 1080, "Port to listen")
 	folder := flag.String("folder", "public", "Folder to serve")
 	silent := flag.Bool("silent", false, "Do not log requests")
+	https := flag.Bool("https", false, "Enable HTTPS")
 	flag.Parse()
 
 	return Args{
 		port:   strconv.Itoa(*port),
 		folder: *folder,
 		silent: *silent,
+		https:  *https,
 	}
 }
 
@@ -114,9 +137,9 @@ func isMedia(filename string) bool {
 		return false
 	}
 }
+
 func getLocalAddr() string {
 	addrs, err := net.InterfaceAddrs()
-
 	if err == nil {
 		for _, addr := range addrs {
 			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
@@ -124,8 +147,35 @@ func getLocalAddr() string {
 			}
 		}
 	}
-
 	return "127.0.0.1"
+}
+
+// Generate in-memory self-signed TLS certificate
+func generateTLSConfig() *tls.Config {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	notBefore := time.Now()
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+	serialNumber, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	derBytes, _ := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	cert := tls.Certificate{
+		Certificate: [][]byte{derBytes},
+		PrivateKey:  priv,
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
 }
 
 const style = `
