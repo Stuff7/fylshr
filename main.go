@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -26,11 +27,23 @@ func main() {
 	fs := http.FileServer(http.Dir(args.folder))
 
 	var handler http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
-		url := r.URL.Path
-		isDir := url[len(url)-1] == '/'
+		urlPath := r.URL.Path
+		fullPath := filepath.Join(args.folder, filepath.Clean(urlPath))
+
+		_, err := os.Stat(fullPath)
+		if os.IsNotExist(err) {
+			custom404 := filepath.Join(args.folder, "404.html")
+			if _, statErr := os.Stat(custom404); statErr == nil {
+				w.WriteHeader(http.StatusNotFound)
+				http.ServeFile(w, r, custom404)
+				return
+			}
+		}
+
+		isDir := urlPath[len(urlPath)-1] == '/'
 
 		if !isDir {
-			filename := path.Base(url)
+			filename := path.Base(urlPath)
 			if isMedia(filename) {
 				disposition := fmt.Sprintf("attachment; filename=%s", strconv.Quote(filename))
 				w.Header().Set("Content-Disposition", disposition)
@@ -70,7 +83,7 @@ func main() {
 			Handler:   handler,
 			TLSConfig: tlsConfig,
 		}
-		log.Fatal(server.ListenAndServeTLS("", "")) // certs provided by TLSConfig
+		log.Fatal(server.ListenAndServeTLS("", ""))
 	} else {
 		log.Fatal(http.ListenAndServe(":"+args.port, handler))
 	}
